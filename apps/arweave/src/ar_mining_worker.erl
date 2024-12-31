@@ -262,6 +262,7 @@ process_chunks(WhichChunk, Candidate, RangeStart, ChunkOffsets, State) ->
 
 process_chunks(WhichChunk, Candidate, _RangeStart, Nonce, _NoncesPerChunk, NonceMax,
 		_ChunkOffsets, _SubChunkSize, Count, State) when Nonce > NonceMax ->
+	%% Update chunk stats
 	Partition = case WhichChunk of
 		chunk1 ->
 			Candidate#mining_candidate.partition_number;
@@ -308,15 +309,18 @@ process_all_sub_chunks(_WhichChunk, <<>>, _Candidate, _Nonce, State) ->
 	State;	
 process_all_sub_chunks(WhichChunk, Chunk, Candidate, Nonce, State) ->
 	{SubChunk, Rest} = extract_sub_chunk(Chunk, Candidate),
-	Candidate2 = Candidate#mining_candidate{ nonce = Nonce },
-	State2 = process_sub_chunk(WhichChunk, Candidate2, SubChunk, State),
-	process_all_sub_chunks(WhichChunk, Rest, Candidate2, Nonce + 1, State2);
-process_all_sub_chunks(WhichChunk, Rest, _Candidate, Nonce, State) ->
-	?LOG_ERROR([{event, failed_to_split_chunk_into_sub_chunks},
+	case byte_size(SubChunk) of 
+		?COMPOSITE_PACKING_SUB_CHUNK_SIZE -> noop;
+		?DATA_CHUNK_SIZE -> noop;
+		_ -> 
+				?LOG_ERROR([{event, failed_to_split_chunk_into_sub_chunks},
 			{remaining_size, byte_size(Rest)},
 			{nonce, Nonce},
-			{chunk, WhichChunk}]),
-	State.
+			{chunk, WhichChunk}])
+	end,
+	Candidate2 = Candidate#mining_candidate{ nonce = Nonce },
+	State2 = process_sub_chunk(WhichChunk, Candidate2, SubChunk, State),
+	process_all_sub_chunks(WhichChunk, Rest, Candidate2, Nonce + 1, State2).
 
 %% @doc Return the sub-chunk and the remaining bytes in the chunk. For spora_2_6 packing
 %% (aka difficulty 0), each sub-chunk is the size of a chunk so there are no remaining
@@ -710,6 +714,7 @@ remove_sessions([SessionKey | RemovedSessions], State) ->
 	TaskQueue = remove_tasks(SessionKey, State#state.task_queue),
 	TasksDiscarded = gb_sets:size(State#state.task_queue) - gb_sets:size(TaskQueue),
 
+	%% Theoratically this should be inside [1..get_nonces_per_chunk()]. Should we add a warning here if not?
 	State2 = update_sub_chunk_cache_size(-ChunksDiscarded, SessionKey, State),
 	?LOG_DEBUG([{event, mining_debug_remove_session},
 		{worker, State#state.name}, {partition, State#state.partition_number},
@@ -837,6 +842,9 @@ remove_sub_chunks_from_cache(#mining_candidate{ cache_ref = CacheRef } = Candida
 	remove_sub_chunks_from_cache(Candidate#mining_candidate{ nonce = Nonce + 1 },
 		SubChunkCount - 1, State3).
 
+%% @doc """
+%% Cache the sub chunk data into sub_chunk_cache.
+%% """
 cache_chunk(Data, Candidate, State) ->
 	#mining_candidate{ cache_ref = CacheRef, nonce = Nonce, session_key = SessionKey } = Candidate,
 	Cache = State#state.sub_chunk_cache,
@@ -900,3 +908,65 @@ report_hashes(State) ->
 %%%===================================================================
 %%% Public Test interface.
 %%%===================================================================
+
+
+%% We want to test cache size, `sub_chunk_cache_size` update when update_sub_chunk_cache_size is called.
+process_chunks_test_() -> 
+	[
+	 {timeout, 30, fun test_process_do_not_cache/0},
+	 {timeout, 30, fun test_process_chunk1_data/0},
+	 {timeout, 30, fun test_process_chunk1_h1_data/0}
+	].
+
+test_process_do_not_cache() -> 
+	test_process_chunk_base(do_not_cache, 1).
+
+test_process_chunk1_data() ->
+	H1 = crypto:strong_rand_bytes(32),
+	test_process_chunk_base({chunk1, H1}, 1).
+
+test_process_chunk1_h1_data() ->
+	Chunk1 = <<0:(256*1024)>>,
+	H1 = crypto:strong_rand_bytes(32),
+	test_process_chunk_base({chunk1, Chunk1, H1}, 2).
+
+test_process_chunk_base(CachedValue, CacheSize) ->
+	State = #state{
+						 sub_chunk_cache_size = #{session1 => CacheSize}, 
+						 sub_chunk_cache = #{
+							 session1 => #{ {ref1, 0} => CachedValue }
+						 }
+					},
+
+	Chunk1 = <<0:(256*1024)>>,
+	Chunk2 = <<1:(256*1024)>>,
+
+	%% For chunk1, no cache is changed
+	WhichChunk = chunk2,
+	Candidate = #mining_candidate{
+								h0 = crypto:strong_rand_bytes(32),
+								h1 = crypto:strong_rand_bytes(32),
+								packing_difficulty = 1,
+								partition_number = 0,
+								nonce = 0,
+								chunk1 = Chunk1,
+								cache_ref = ref1,
+								session_key = session1
+								},
+	RangeStart = 0,
+	ChunkOffsets = [{?DATA_CHUNK_SIZE, Chunk2}],
+
+	%% Action
+	State2 = process_chunks(WhichChunk, Candidate, RangeStart, ChunkOffsets, State),
+
+	%% Validate
+
+	%% Packing Difficulty 1
+	%% (-1) becasue id say to not cache in ref1, 0.
+	NoncePerChunk = 4 - 1,
+	SessionCache = maps:get(session1, State2#state.sub_chunk_cache),
+	?assertEqual(NoncePerChunk, maps:size(SessionCache)),
+
+	%% Because we have do_not_cache, 1 is removed from the chunk cache size.
+	?assertEqual(0, maps:get(session1, State2#state.sub_chunk_cache_size)).
+
