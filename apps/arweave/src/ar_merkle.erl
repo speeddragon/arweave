@@ -505,7 +505,7 @@ test_tree_with_rebase_nested() ->
 	%%             _____SubTree1______________                    Leaf6
 	%%            /                           \           
 	%%       SubTree2              ________SubTree3_________
-	%%       /       \           /                           \  
+	%%       /       \            /                         \
 	%%    Leaf1    Leaf2     SubTree4 (with offset reset)   Leaf5
 	%%                       /       \
 	%%                    Leaf3    Leaf4 (with offset reset)

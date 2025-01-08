@@ -76,73 +76,7 @@ handle_cast(pull, State) ->
 					%% Push the peer to the back of the queue.
 					{noreply, State#state{ remote_servers = RotatedServers }};
 				{ok, Peer} ->
-					case ar_http_iface_client:get_vdf_update(Peer) of
-						{ok, Update} ->
-							#nonce_limiter_update{ session_key = SessionKey,
-									session = #vdf_session{
-											step_number = SessionStepNumber } } = Update,
-							State2 = update_latest_session_key(Peer, SessionKey, State),
-							case ar_nonce_limiter:apply_external_update(Update, Peer) of
-								ok ->
-									ar_util:cast_after(?PULL_FREQUENCY_MS, ?MODULE, pull),
-									{noreply, State2};
-								#nonce_limiter_update_response{ session_found = false } ->
-									case fetch_and_apply_session_and_previous_session(Peer) of
-										{error, _} ->
-											gen_server:cast(?MODULE, pull),
-											{noreply, State2#state{
-													remote_servers = RotatedServers }};
-										_ ->
-											ar_util:cast_after(?PULL_FREQUENCY_MS,
-													?MODULE, pull),
-											{noreply, State2}
-									end;
-								#nonce_limiter_update_response{ step_number = StepNumber }
-										when StepNumber > SessionStepNumber ->
-									%% We are ahead of the server - may be, it is not
-									%% the fastest server in the list so try another one,
-									%% if there are more servers in the configuration
-									%% and they are not on timeout.
-									gen_server:cast(?MODULE, pull),
-									{noreply, State2#state{
-											remote_servers = RotatedServers }};
-								#nonce_limiter_update_response{ step_number = StepNumber }
-										when StepNumber == SessionStepNumber ->
-									%% We are in sync with the server. Re-try soon.
-									ar_util:cast_after(?NO_UPDATE_PULL_FREQUENCY_MS,
-											?MODULE, pull),
-									{noreply, State2};
-								_ ->
-									%% We have received a partial session, but there's a gap
-									%% in the step numbers, e.g., the update we received is at
-									%% step 100, but our last seen step was 90.
-									case fetch_and_apply_session(Peer) of
-										{error, _} ->
-											gen_server:cast(?MODULE, pull),
-											{noreply, State2#state{
-													remote_servers = RotatedServers }};
-										_ ->
-											ar_util:cast_after(?PULL_FREQUENCY_MS,
-													?MODULE, pull),
-											{noreply, State2}
-									end
-							end;
-						{error, not_found} ->
-							?LOG_WARNING([{event, failed_to_fetch_vdf_update},
-									{peer, ar_util:format_peer(Peer)},
-									{error, not_found}]),
-							%% The server might be restarting.
-							%% Try another one, if there are any.
-							gen_server:cast(?MODULE, pull),
-							{noreply, State#state{ remote_servers = RotatedServers }};
-						{error, Reason} ->
-							?LOG_WARNING([{event, failed_to_fetch_vdf_update},
-									{peer, ar_util:format_peer(Peer)},
-									{error, io_lib:format("~p", [Reason])}]),
-							%% Try another server, if there are any.
-							gen_server:cast(?MODULE, pull),
-							{noreply, State#state{ remote_servers = RotatedServers }}
-					end
+					handle_get_vdf_update(Peer, RotatedServers, State)
 			end
 	end;
 
@@ -184,6 +118,78 @@ terminate(_Reason, _State) ->
 %%%===================================================================
 %%% Private functions.
 %%%===================================================================
+handle_get_vdf_update(Peer, RotatedServers, State) -> 
+	case ar_http_iface_client:get_vdf_update(Peer) of
+		{ok, Update} ->
+			apply_external_update(Update, RotatedServers, Peer, State);
+		{error, not_found} ->
+			?LOG_WARNING([{event, failed_to_fetch_vdf_update},
+					{peer, ar_util:format_peer(Peer)},
+					{error, not_found}]),
+			%% The server might be restarting.
+			%% Try another one, if there are any.
+			gen_server:cast(?MODULE, pull),
+			{noreply, State#state{ remote_servers = RotatedServers }};
+		{error, Reason} ->
+			?LOG_WARNING([{event, failed_to_fetch_vdf_update},
+					{peer, ar_util:format_peer(Peer)},
+					{error, io_lib:format("~p", [Reason])}]),
+			%% Try another server, if there are any.
+			gen_server:cast(?MODULE, pull),
+			{noreply, State#state{ remote_servers = RotatedServers }}
+	end.
+
+apply_external_update(Update, RotatedServers, Peer, State) -> 
+	#nonce_limiter_update{ session_key = SessionKey,
+		session = #vdf_session{
+				step_number = SessionStepNumber } } = Update,
+
+	State2 = update_latest_session_key(Peer, SessionKey, State),
+	case ar_nonce_limiter:apply_external_update(Update, Peer) of
+		ok ->
+			ar_util:cast_after(?PULL_FREQUENCY_MS, ?MODULE, pull),
+			{noreply, State2};
+		#nonce_limiter_update_response{ session_found = false } ->
+			case fetch_and_apply_session_and_previous_session(Peer) of
+				{error, _} ->
+					gen_server:cast(?MODULE, pull),
+					{noreply, State2#state{
+							remote_servers = RotatedServers }};
+				_ ->
+					ar_util:cast_after(?PULL_FREQUENCY_MS,
+							?MODULE, pull),
+					{noreply, State2}
+			end;
+		#nonce_limiter_update_response{ step_number = StepNumber }
+				when StepNumber > SessionStepNumber ->
+			%% We are ahead of the server - may be, it is not
+			%% the fastest server in the list so try another one,
+			%% if there are more servers in the configuration
+			%% and they are not on timeout.
+			gen_server:cast(?MODULE, pull),
+			{noreply, State2#state{
+					remote_servers = RotatedServers }};
+		#nonce_limiter_update_response{ step_number = StepNumber }
+				when StepNumber == SessionStepNumber ->
+			%% We are in sync with the server. Re-try soon.
+			ar_util:cast_after(?NO_UPDATE_PULL_FREQUENCY_MS,
+					?MODULE, pull),
+			{noreply, State2};
+		_ ->
+			%% We have received a partial session, but there's a gap
+			%% in the step numbers, e.g., the update we received is at
+			%% step 100, but our last seen step was 90.
+			case fetch_and_apply_session(Peer) of
+				{error, _} ->
+					gen_server:cast(?MODULE, pull),
+					{noreply, State2#state{
+							remote_servers = RotatedServers }};
+				_ ->
+					ar_util:cast_after(?PULL_FREQUENCY_MS,
+							?MODULE, pull),
+					{noreply, State2}
+			end
+	end.
 
 fetch_and_apply_session_and_previous_session(Peer) ->
 	case ar_http_iface_client:get_vdf_session(Peer) of

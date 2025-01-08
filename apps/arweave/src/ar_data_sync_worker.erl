@@ -240,7 +240,8 @@ sync_range({Start, End, Peer, TargetStoreID, RetryCount} = Args, State) ->
 				true ->
 					ok;
 				false ->
-					case ar_http_iface_client:get_chunk_binary(Peer, Start2, get_target_packing(TargetStoreID, State#state.request_packed_chunks)) of
+					TargetPacking = get_target_packing(TargetStoreID, State#state.request_packed_chunks),
+					case ar_http_iface_client:get_chunk_binary(Peer, Start2, TargetPacking) of
 						{ok, #{ chunk := Chunk } = Proof, _Time, _TransferSize} ->
 							%% In case we fetched a packed small chunk,
 							%% we may potentially skip some chunks by

@@ -9,6 +9,7 @@
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl"). % Used in ?RPM_BY_PATH.
 -include_lib("arweave/include/ar_blacklist_middleware.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 -record(state, {
 	traces,
@@ -134,3 +135,15 @@ cut_trace(N, Trace, Now) ->
 		false ->
 			{N, Trace}
 	end.
+
+
+%%%===================================================================
+%%% Test 
+%%%===================================================================
+
+cut_trace_test() -> 
+	Now = os:system_time(millisecond),
+	Trace = queue:from_list([Now - 45000, Now - 4000]),
+	{N, RTrace} = cut_trace(2, Trace, Now),
+	?assertEqual(1, N),
+	?assertEqual({[], [Now - 4000]}, RTrace).
